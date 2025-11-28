@@ -13,20 +13,27 @@ namespace Winsomnia
         [STAThread]
         static void Main()
         {
-            using var mutex = new Mutex(true, "WinsomniaSingleton", out bool createdNew);
+            var mutex = new Mutex(true, "WinsomniaSingleton", out bool createdNew);
             if (!createdNew)
+            {
+                mutex.Dispose();
                 return; // Already running
+            }
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
             try
             {
-                Application.Run(new WinsomniaContext());
+                Application.Run(new WinsomniaContext(mutex));
             }
             catch (Exception ex)
             {
                 MessageBox.Show($"A fatal error occurred: {ex.Message}", "Winsomnia Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                mutex.Dispose();
             }
         }
 
@@ -83,11 +90,20 @@ namespace Winsomnia
         private sealed class WinsomniaContext : ApplicationContext
         {
             private readonly NotifyIcon _trayIcon;
+            private readonly ContextMenuStrip _contextMenu;
+            private readonly Mutex _mutex;
+            private readonly ToolStripMenuItem _toggleMenuItem;
+            private bool _isEnabled;
 
-            public WinsomniaContext()
+            public WinsomniaContext(Mutex mutex)
             {
-                var menu = new ContextMenuStrip();
-                menu.Items.Add("Exit", null, OnExit);
+                _mutex = mutex;
+                _contextMenu = new ContextMenuStrip();
+
+                _toggleMenuItem = new ToolStripMenuItem("Disable", null, OnToggle);
+                _contextMenu.Items.Add(_toggleMenuItem);
+                _contextMenu.Items.Add(new ToolStripSeparator());
+                _contextMenu.Items.Add("Exit", null, OnExit);
 
                 // Fallback to system icon if resource is missing
                 Icon appIcon = Resources.winsomnia ?? SystemIcons.Application;
@@ -96,44 +112,65 @@ namespace Winsomnia
                 {
                     Icon = appIcon,
                     Text = "Winsomnia (Initializing...)",
-                    ContextMenuStrip = menu,
+                    ContextMenuStrip = _contextMenu,
                     Visible = true
                 };
 
-                EnableInsomnia();
+                SetInsomniaState(true);
             }
 
-            private void EnableInsomnia()
+            private void SetInsomniaState(bool enable)
             {
                 try
                 {
-                    PowerAvailability.PreventSleep();
-                    _trayIcon.Text = "Winsomnia (Active - PC will not sleep)";
+                    if (enable)
+                    {
+                        PowerAvailability.PreventSleep();
+                        _isEnabled = true;
+                        _trayIcon.Text = "Winsomnia (Active - PC will not sleep)";
+                        _toggleMenuItem.Text = "Disable";
+                    }
+                    else
+                    {
+                        PowerAvailability.RestoreSleep();
+                        _isEnabled = false;
+                        _trayIcon.Text = "Winsomnia (Inactive - PC will sleep normally)";
+                        _toggleMenuItem.Text = "Enable";
+                    }
                 }
                 catch (Win32Exception ex)
                 {
                     _trayIcon.Text = "Winsomnia (Error)";
-                    _trayIcon.ShowBalloonTip(3000, "Activation Failed",
-                        $"Could not keep system awake. Windows Error: {ex.Message}", ToolTipIcon.Error);
+                    _trayIcon.ShowBalloonTip(3000, enable ? "Activation Failed" : "Deactivation Failed",
+                        $"Could not change sleep state. Windows Error: {ex.Message}", ToolTipIcon.Error);
                 }
+            }
+
+            private void OnToggle(object? sender, EventArgs e)
+            {
+                SetInsomniaState(!_isEnabled);
             }
 
             private void OnExit(object? sender, EventArgs e)
             {
                 try
                 {
-                    // Attempt to reset state before exiting
-                    PowerAvailability.RestoreSleep();
+                    // Attempt to reset state before exiting (only if currently enabled)
+                    if (_isEnabled)
+                    {
+                        PowerAvailability.RestoreSleep();
+                    }
                 }
                 catch
                 {
-                    // Swallow error on exit, as the thread termination 
+                    // Swallow error on exit, as the thread termination
                     // by the OS cleans up execution states anyway.
                 }
                 finally
                 {
                     _trayIcon.Visible = false;
                     _trayIcon.Dispose();
+                    _contextMenu.Dispose();
                     ExitThread();
                 }
             }
